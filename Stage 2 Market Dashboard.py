@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output, dash_table
+import dash_bootstrap_components as dbc
 import datetime
 import webbrowser
 from threading import Timer
@@ -12,40 +13,27 @@ from threading import Timer
 DATA_DIR = "data"
 FILE_PATTERN = "Stage 2_*.csv" 
 
-# --- 1. DATA CLEANING HELPERS ---
+# --- 1. DATA CLEANING ---
 def clean_percentage(x):
-    """Converts '5.4%' to float 5.4"""
     if isinstance(x, str):
         clean_str = x.replace('%', '').replace(',', '')
-        try:
-            return float(clean_str)
-        except ValueError:
-            return 0.0
+        try: return float(clean_str)
+        except ValueError: return 0.0
     return x
 
 def clean_volume(x):
-    """Converts '1.5M' to 1500000, '500K' to 500000"""
     if isinstance(x, str):
         x = x.upper().replace(',', '')
-        if 'K' in x:
-            return float(x.replace('K', '')) * 1000
-        elif 'M' in x:
-            return float(x.replace('M', '')) * 1000000
-        elif 'B' in x:
-            return float(x.replace('B', '')) * 1000000000
-        try:
-            return float(x)
-        except ValueError:
-            return 0.0
+        if 'K' in x: return float(x.replace('K', '')) * 1000
+        elif 'M' in x: return float(x.replace('M', '')) * 1000000
+        elif 'B' in x: return float(x.replace('B', '')) * 1000000000
+        try: return float(x)
+        except ValueError: return 0.0
     return x
 
-# --- 2. DATA INGESTION ---
 def load_and_process_data():
     all_files = glob.glob(os.path.join(DATA_DIR, FILE_PATTERN))
-    
-    if not all_files:
-        print("No files found. Please check your data directory.")
-        return pd.DataFrame()
+    if not all_files: return pd.DataFrame()
 
     df_list = []
     for filename in all_files:
@@ -56,16 +44,12 @@ def load_and_process_data():
             
             df = pd.read_csv(filename)
             df['Date'] = pd.to_datetime(scan_date)
-            # Create a string version of date for the Category Axis (looks cleaner)
             df['DateStr'] = df['Date'].dt.strftime('%Y-%m-%d')
             
-            # --- CLEANING DATA TYPES ---
             if 'Price Change % 1 day' in df.columns:
                 df['Price Change % 1 day'] = df['Price Change % 1 day'].apply(clean_percentage)
-            
             if 'Volume 1 day' in df.columns:
                 df['Volume 1 day'] = df['Volume 1 day'].apply(clean_volume)
-                
             if 'Relative Volume 1 day' in df.columns:
                  df['Relative Volume 1 day'] = pd.to_numeric(df['Relative Volume 1 day'], errors='coerce').fillna(0)
             
@@ -73,34 +57,26 @@ def load_and_process_data():
         except Exception as e:
             print(f"Error reading {filename}: {e}")
 
-    if not df_list:
-        return pd.DataFrame()
-
-    full_df = pd.concat(df_list, ignore_index=True)
-    full_df = full_df.sort_values('Date')
-    return full_df
+    if not df_list: return pd.DataFrame()
+    return pd.concat(df_list, ignore_index=True).sort_values('Date')
 
 df = load_and_process_data()
 
-# --- 3. METRICS & SCORECARD LOGIC ---
+# --- 2. METRICS ---
 top_sector_name = "N/A"
 top_sector_count = 0
 fastest_growing_sector = "N/A"
-growth_count = 0
 growth_str = "0"
-
 latest_df = pd.DataFrame()
 latest_date = datetime.date.today()
 
 if not df.empty:
-    latest_date = df['Date'].max()
-    latest_df = df[df['Date'] == latest_date].copy()
+    latest_date = df['Date'].max().date()
+    latest_df = df[df['Date'] == pd.to_datetime(latest_date)].copy()
     
-    # Calculate Momentum Score
     latest_df['Momentum Score'] = latest_df['Price Change % 1 day'] * latest_df['Relative Volume 1 day']
     latest_df = latest_df.sort_values('Momentum Score', ascending=False)
 
-    # Scorecard Data
     sector_counts = latest_df['Sector'].value_counts()
     if not sector_counts.empty:
         top_sector_name = sector_counts.idxmax()
@@ -117,145 +93,111 @@ if not df.empty:
         growth_count = int(delta.max())
         growth_str = f"+{growth_count}" if growth_count > 0 else str(growth_count)
 
-# --- 4. STYLING ---
-card_style = {
-    'boxShadow': '0 4px 8px 0 rgba(0,0,0,0.2)', 'transition': '0.3s',
-    'width': '20%', 'borderRadius': '5px', 'padding': '20px',
-    'backgroundColor': '#f9f9f9', 'textAlign': 'center',
-    'display': 'inline-block', 'margin': '10px'
-}
+# --- 3. DASH LAYOUT ---
+app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 
-# --- 5. DASH LAYOUT ---
-app = Dash(__name__)
-
-app.layout = html.Div([
-    html.H1("Stage 2 Market Dashboard", style={'textAlign': 'center', 'fontFamily': 'sans-serif'}),
+app.layout = dbc.Container([
     
-    # SCORECARDS
-    html.Div([
-        html.Div([html.H4("Total Scanned"), html.H2(f"{len(latest_df)}", style={'color': '#2c3e50'})], style=card_style),
-        html.Div([html.H4("Largest Sector"), html.H2(top_sector_name, style={'color': '#2980b9'}), html.P(f"({top_sector_count} stocks)")], style=card_style),
-        html.Div([html.H4("Top Sector Inflow"), html.H2(fastest_growing_sector, style={'color': '#27ae60'}), html.P(f"Change: {growth_str}")], style=card_style),
-    ], style={'textAlign': 'center', 'marginBottom': '30px'}),
+    # Header
+    dbc.NavbarSimple(brand="Stage 2 Market Scanner", brand_href="#", color="primary", dark=True, className="mb-4"),
 
-    # SECTOR TRENDS
-    html.Div([
-        html.H3("Sector Rotation Analysis"),
-        html.Label("Select Sectors:", style={'fontWeight': 'bold'}),
-        dcc.Dropdown(
-            id='sector-dropdown',
-            options=[{'label': s, 'value': s} for s in df['Sector'].dropna().unique()],
-            multi=True,
-            value=sector_counts.index[:5].tolist() if not df.empty else [],
-        ),
-        dcc.Graph(id='sector-trend-graph'),
-    ], style={'padding': '20px', 'borderTop': '1px solid #ddd', 'borderBottom': '1px solid #ddd'}),
+    # Top Cards
+    dbc.Row([
+        dbc.Col(dbc.Card([dbc.CardHeader("Total Scanned Stocks"), dbc.CardBody([html.H2(f"{len(latest_df)}", className="text-center text-primary")])], color="light", outline=True), width=12, lg=4, className="mb-3"),
+        dbc.Col(dbc.Card([dbc.CardHeader("Largest Sector"), dbc.CardBody([html.H2(top_sector_name, className="text-center text-info"), html.P(f"Count: {top_sector_count}", className="text-center text-muted small")])], color="light", outline=True), width=12, lg=4, className="mb-3"),
+        dbc.Col(dbc.Card([dbc.CardHeader("Top Inflow Sector"), dbc.CardBody([html.H2(fastest_growing_sector, className="text-center text-success"), html.P(f"Change: {growth_str}", className="text-center text-muted small")])], color="light", outline=True), width=12, lg=4, className="mb-3"),
+    ], className="mb-4"),
 
-    # MOMENTUM SCANNER
-    html.Div([
-        html.H3(f"Momentum Scanner (Data: {latest_date})"),
-        html.Div([
-            html.Div([dcc.Graph(id='momentum-scatter')], style={'width': '60%', 'display': 'inline-block'}),
-            html.Div([
-                html.H4("Top Momentum Plays"),
+    # Sector Trend
+    dbc.Card([
+        dbc.CardHeader("🔎 Sector Rotation Analysis"),
+        dbc.CardBody([
+            html.Label("Compare Sectors:", className="fw-bold"),
+            dcc.Dropdown(id='sector-dropdown', options=[{'label': s, 'value': s} for s in df['Sector'].dropna().unique()], multi=True, value=sector_counts.index[:5].tolist() if not df.empty else [], className="mb-3"),
+            dcc.Loading(dcc.Graph(id='sector-trend-graph'))
+        ])
+    ], className="mb-4 shadow-sm"),
+
+    # Momentum Scanner (Responsive Split)
+    dbc.Row([
+        # LEFT: GRAPH
+        # lg=8 means "Use 8 columns on large screens". width=12 means "Use full width on mobile"
+        dbc.Col(dbc.Card([
+            dbc.CardHeader(f"🚀 Momentum Map ({latest_date})"),
+            dbc.CardBody([dcc.Graph(id='momentum-scatter', style={'height': '600px'})])
+        ], className="shadow-sm mb-3"), width=12, lg=8), 
+
+        # RIGHT: TABLE
+        # lg=4 means "Use 4 columns on large screens". It will naturally drop below on mobile.
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("🏆 Top Momentum List"),
+            dbc.CardBody([
                 dash_table.DataTable(
                     id='top-stocks-table',
-                    columns=[{"name": i, "id": i} for i in ['Symbol', 'Sector', 'Price Change % 1 day', 'Relative Volume 1 day']],
-                    data=latest_df.head(10).to_dict('records'),
+                    columns=[{"name": "Sym", "id": "Symbol"}, {"name": "Sec", "id": "Sector"}, {"name": "% Chg", "id": "Price Change % 1 day"}, {"name": "R.Vol", "id": "Relative Volume 1 day"}],
+                    data=latest_df.head(15).to_dict('records'),
                     style_table={'overflowX': 'auto'},
-                    style_cell={'textAlign': 'left', 'padding': '5px', 'fontFamily': 'sans-serif'},
-                    style_header={'backgroundColor': '#ecf0f1', 'fontWeight': 'bold'},
-                    page_size=10
+                    style_as_list_view=True,
+                    style_cell={'fontSize': '12px', 'textAlign': 'left', 'padding': '5px'},
+                    style_header={'backgroundColor': 'white', 'fontWeight': 'bold'},
+                    style_data_conditional=[{'if': {'row_index': 'odd'}, 'backgroundColor': 'rgb(248, 248, 248)'}],
+                    page_size=13
                 )
-            ], style={'width': '38%', 'display': 'inline-block', 'verticalAlign': 'top', 'paddingLeft': '2%'})
-        ])
-    ], style={'padding': '20px'})
-])
+            ])
+        ], className="shadow-sm mb-3"), width=12, lg=4)
+    ], className="mb-4"),
 
-# --- 6. CALLBACKS ---
+    html.Div([html.Hr(), html.P("Automated Market Analysis Tool", className="text-center text-muted")], className="mb-4")
+], fluid=True)
 
-@app.callback(
-    Output('sector-trend-graph', 'figure'),
-    Input('sector-dropdown', 'value')
-)
+# --- CALLBACKS ---
+@app.callback(Output('sector-trend-graph', 'figure'), Input('sector-dropdown', 'value'))
 def update_sector_graph(selected_sectors):
-    if df.empty or not selected_sectors:
-        return go.Figure()
-
+    if df.empty or not selected_sectors: return go.Figure()
     filtered_df = df[df['Sector'].isin(selected_sectors)]
-    # Use 'DateStr' here so Plotly sees it as text categories
     sector_counts_hist = filtered_df.groupby(['DateStr', 'Sector']).size().reset_index(name='Stock Count')
-    
-    fig = px.line(
-        sector_counts_hist, 
-        x='DateStr', # Use the string version
-        y='Stock Count', 
-        color='Sector', 
-        markers=True,
-        title="Breadth: Number of Stocks Qualifying for Stage 2"
-    )
-    
-    # --- FIX 1: FORCE EVEN INTERVALS ---
-    # type='category' ensures Plotly treats every date as an equal step, ignoring gaps
-    fig.update_xaxes(type='category', tickangle=-45) 
-    
-    fig.update_layout(
-        hovermode="x unified",
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        xaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
-        yaxis=dict(showgrid=True, gridcolor='#f0f0f0')
-    )
+    fig = px.line(sector_counts_hist, x='DateStr', y='Stock Count', color='Sector', markers=True, template="simple_white")
+    fig.update_xaxes(type='category', tickangle=-45)
+    fig.update_layout(margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified", legend=dict(orientation="h", y=1.1))
     return fig
 
-@app.callback(
-    Output('momentum-scatter', 'figure'),
-    Input('sector-dropdown', 'value')
-)
+@app.callback(Output('momentum-scatter', 'figure'), Input('sector-dropdown', 'value'))
 def update_momentum_scatter(_):
-    if latest_df.empty:
-        return go.Figure()
-
-    # --- FIX 2: SAFE COPY & TYPE CHECKING ---
+    if latest_df.empty: return go.Figure()
     plot_df = latest_df.copy().reset_index(drop=True)
-    
-    # Ensure numeric columns
-    cols_to_check = ['Relative Volume 1 day', 'Price Change % 1 day', 'Volume 1 day']
-    for col in cols_to_check:
-        plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce').fillna(0)
+    cols = ['Relative Volume 1 day', 'Price Change % 1 day', 'Volume 1 day']
+    for c in cols: plot_df[c] = pd.to_numeric(plot_df[c], errors='coerce').fillna(0)
 
     try:
         fig = px.scatter(
-            plot_df,
-            x='Relative Volume 1 day',
-            y='Price Change % 1 day',
+            plot_df, x='Relative Volume 1 day', y='Price Change % 1 day',
             hover_data=['Symbol', 'Sector', 'Market capitalization'],
-            color='Sector',
-            size='Volume 1 day',
-            title="Momentum Map: Rel Vol vs Price Change"
-            # REMOVED: template="plotly_white" (Fixes crash)
+            color='Sector', size='Volume 1 day',
+            template="simple_white"
         )
         
-        # Manually apply clean white styling
+        # --- FIX 1: Add Clear Y=0 Line ---
+        fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1.5, opacity=0.5)
+        
+        # --- FIX 2: Move Legend to Right Side ---
+        # Moving legend to the right prevents it from covering the dots
         fig.update_layout(
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            xaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
-            yaxis=dict(showgrid=True, gridcolor='#f0f0f0')
+            margin=dict(l=20, r=20, t=20, b=20),
+            legend=dict(
+                orientation="v",  # Vertical
+                yanchor="top",
+                y=1,
+                xanchor="left",
+                x=1.02  # Places it just outside the graph to the right
+            )
         )
-
-        fig.add_vline(x=1.5, line_dash="dash", line_color="green", annotation_text="High Vol")
-        fig.add_hline(y=0, line_dash="solid", line_color="black")
+        # Add visual reference for "High Vol"
+        fig.add_vline(x=1.5, line_dash="dash", line_color="green")
+        
         return fig
-    except Exception as e:
-        print(f"Graph Error: {e}")
-        return go.Figure()
+    except Exception: return go.Figure()
 
-# --- 7. RUN ---
-def open_browser():
-    webbrowser.open_new("http://127.0.0.1:8050/")
-
+def open_browser(): webbrowser.open_new("http://127.0.0.1:8050/")
 if __name__ == '__main__':
-    if not os.environ.get("WERKZEUG_RUN_MAIN"):
-        Timer(1, open_browser).start()
+    if not os.environ.get("WERKZEUG_RUN_MAIN"): Timer(1, open_browser).start()
     app.run(debug=True)
